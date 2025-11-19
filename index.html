@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WebGL Symmetry Trainer (Grid Painter + Axis)</title>
+  <style>
+    :root { --bg:#0b0f14; --panel:#131a22; --muted:#7c8796; --accent:#32b3ff; --ok:#22c55e; --bad:#ef4444; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; height:100%; background:var(--bg); color:#e6eef7; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
+    .app { display:flex; gap:16px; height:100%; padding:14px; }
+    #glwrap { flex:1; position:relative; border-radius:14px; overflow:hidden; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+    canvas { width:100%; height:100%; display:block; background:#0a0f14; }
+    .hud { position:absolute; left:10px; bottom:10px; background:rgba(0,0,0,.4); padding:8px 10px; border-radius:10px; font-size:12px; color:#b9c6d6; }
+    .panel { width:360px; min-width:320px; background:var(--panel); border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:12px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 10px 30px rgba(0,0,0,.35); }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .group { background:#0f151c; border:1px solid #253041; border-radius:12px; padding:10px; }
+    .group h3 { margin:0 0 8px; font-size:13px; color:#b6c4d7; }
+    .pill { padding:6px 10px; background:#0f151c; border:1px solid #273345; border-radius:999px; font-size:12px; color:#c6d4e4; cursor:pointer; user-select:none; }
+    .pill.active { border-color: var(--accent); color:#fff; box-shadow: 0 0 0 2px rgba(50,179,255,.15) inset; }
+    .btn { padding:9px 12px; background:#14202b; border:1px solid #2d3a4f; color:#eaf3ff; border-radius:10px; cursor:pointer; font-weight:600; }
+    .btn:hover { border-color:#3a4b66; }
+    .btn.ghost { background:transparent; }
+    .colors { display:flex; gap:10px; }
+    .swatch { width:28px; height:28px; border-radius:8px; border:2px solid #2b384b; cursor:pointer; position:relative; }
+    .swatch.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .field { display:flex; gap:8px; align-items:center; }
+    .field input[type="range"]{ width: 160px; }
+    label { font-size:12px; color:#97a6b8; }
+    .small { font-size:12px; color:#9fb0c6; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; background:#0e1420; padding:2px 6px; border-radius:6px; border:1px solid #26344a; color:#cce0ff; }
+    .score { font-weight:700; }
+    .ok { color:var(--ok); }
+    .bad { color:var(--bad); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div id="glwrap">
+      <canvas id="glcanvas"></canvas>
+      <div class="hud" id="hud"></div>
+    </div>
+
+    <div class="panel">
+      <div class="group">
+        <h3>Mode</h3>
+        <div class="row" id="modeRow">
+          <div class="pill active" data-mode="paint">Paint Answer</div>
+          <!-- <div class="pill" data-mode="line">Axis Only</div> -->
+        </div>
+        <div class="small">Left-click/drag to fill, right-click to erase. Shift floods a row. Answer is compared against the reflection of the served shape.</div>
+      </div>
+
+      <div class="group">
+        <h3>Palette (4 colors + eraser)</h3>
+        <div class="colors" id="palette"></div>
+      </div>
+
+      <div class="group">
+        <h3>Grid</h3>
+        <div class="row field"><label>Columns</label><input id="cols" type="range" min="6" max="64" step="1" value="24"><span id="colsVal">24</span></div>
+        <div class="row field"><label>Rows</label><input id="rows" type="range" min="6" max="64" step="1" value="24"><span id="rowsVal">24</span></div>
+        <div class="row"><button class="btn" id="clearCells">Clear Answer</button></div>
+      </div>
+
+      <div class="group">
+        <h3>Symmetry Challenge</h3>
+        <div class="row field"><label>Axis Angle</label><input id="axisAngle" type="range" min="-180" max="180" step="45" value="0"><span id="axisVal">0°</span></div>
+        <div class="row field"><label>Shape Cells</label><input id="shapeCells" type="range" min="4" max="200" step="1" value="5"><span id="shapeCellsVal">5</span></div>
+        <div class="row field"><label>Max Colors</label><input id="shapeColors" type="range" min="1" max="4" step="1" value="4"><span id="shapeColorsVal">4</span></div>
+        <div class="row"><button class="btn" id="newChallenge">New Challenge</button></div>
+      </div>
+
+      <div class="group">
+        <h3>Evaluate</h3>
+        <div class="row"><button class="btn" id="check">Check Answer</button><button class="btn ghost" id="showSolution">Show Solution</button></div>
+        <div class="small">Result: <span id="result" class="score"></span></div>
+        <!-- UPDATED LABEL TEXT -->
+        <div class="small">Attempts: <span id="attempts">0</span> | Used Solution?: <span id="usedCheck">No</span></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  /*** --- Setup / State --- ***/
+  const canvas = document.getElementById('glcanvas');
+  const hud = document.getElementById('hud');
+  const gl = canvas.getContext('webgl', { antialias:true, alpha:false, preserveDrawingBuffer:true });
+  if(!gl){ alert('WebGL not supported'); return; }
+
+  let gridCols = 24, gridRows = 24;
+  const paletteColors = [
+    [100.0/255.0, 143.0/255.0, 255.0/255.0, 1.0], // ibm-blue
+    [220.0/255.0, 38.0/255.0, 127.0/255.0, 1.0], // ibm-magenta
+    [254.0/255.0, 97.0/255.0, 0.0/255.0, 1.0], // ibm-orange
+    [255.0/255.0, 176.0/255.0, 0.0/255.0, 1.0], // ibm-yellow
+  ];
+  const eraser = [0,0,0,0];
+  let currentColorIndex = 0; // 0..3 or -1
+  let mode = 'paint';
+
+  // Answer (user) painted cells
+  let painted = new Map(); // key "i,j" -> colorIdx
+  // Served challenge cells
+  let served = new Map(); // key "i,j" -> colorIdx
+  let showServed = true;
+
+  // Tracking attempts and solution reveal
+  let attemptCount = 0;       // how many times "Check Answer" was used
+  let solutionRevealed = false; // whether "Show Solution" has been pressed
+
+  // Axis of symmetry (through origin) in radians
+  let axisAngle = 0; // radians
+
+  // Lines the user adds (still supported)
+  let lines = [];
+
+  // Batches
+  let batch = {
+    gridLineCount:0, gridPos:null, gridCol:null,
+    axesPos:null, axesCol:null,
+    servedPos:null, servedCol:null,
+    answerPos:null, answerCol:null,
+    linePos:null, lineCol:null, lineCount:0,
+    marksPos:null, marksCol:null
+  };
+
+  const state = { aspect:1 };
+
+  function resizeCanvas(){
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const w = Math.floor(rect.width * dpr);
+    const h = Math.floor(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+    gl.viewport(0,0,gl.drawingBufferWidth, gl.drawingBufferHeight);
+    state.aspect = w / h; // keep square cells via shader + picking inverse
+  }
+  window.addEventListener('resize', ()=>{ resizeCanvas(); draw(); });
+  resizeCanvas();
+
+  /*** --- Shaders --- ***/
+  const vs = `
+    attribute vec2 a_pos;      // world pos in cell units
+    attribute vec4 a_col;      // vertex color
+    uniform vec2 u_half;       // half extents
+    uniform float u_aspect;    // viewport aspect
+    varying vec4 v_col;
+    void main(){
+      vec2 clip = a_pos / u_half;
+      clip.x /= u_aspect; // aspect correction keeps squares
+      gl_Position = vec4(clip, 0.0, 1.0);
+      v_col = a_col;
+    }
+  `;
+  const fs = `
+    precision mediump float;
+    varying vec4 v_col;
+    void main(){ gl_FragColor = v_col; }
+  `;
+  function compile(gl, type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+      throw new Error('Shader compile failed: ' + gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+  function program(gl, vsSrc, fsSrc){
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if(!gl.getProgramParameter(p, gl.LINK_STATUS)){
+      throw new Error('Program link failed: ' + gl.getProgramInfoLog(p));
+    }
+    return p;
+  }
+  const prog = program(gl, vs, fs);
+  gl.useProgram(prog);
+  const loc = {
+    a_pos: gl.getAttribLocation(prog, 'a_pos'),
+    a_col: gl.getAttribLocation(prog, 'a_col'),
+    u_half: gl.getUniformLocation(prog, 'u_half'),
+    u_aspect: gl.getUniformLocation(prog, 'u_aspect'),
+  };
+
+  const bufPos = gl.createBuffer();
+  const bufCol = gl.createBuffer();
+
+  /*** --- Builders --- ***/
+  function rebuildGridLines(){
+    const cols = gridCols, rows = gridRows;
+    const halfW = cols/2, halfH = rows/2;
+    const verts = [];
+    const colrs = [];
+    const gridColor = [0.18, 0.24, 0.32, 1.0];
+    const originColor = [1.0, 0.75, 0.25, 1.0];
+
+    for(let i=0;i<=cols;i++){
+      const x = i - halfW;
+      const color = (x===0) ? originColor : gridColor;
+      verts.push(x,-halfH, x,+halfH);
+      for(let k=0;k<2;k++) colrs.push(...color);
+    }
+    for(let j=0;j<=rows;j++){
+      const y = j - halfH;
+      const color = (y===0) ? originColor : gridColor;
+      verts.push(-halfW,y, +halfW,y);
+      for(let k=0;k<2;k++) colrs.push(...color);
+    }
+    batch.gridLineCount = (cols+1)+(rows+1);
+    batch.gridPos = new Float32Array(verts);
+    batch.gridCol = new Float32Array(colrs);
+  }
+
+  function rebuildAxisLine(){
+    const dx = Math.cos(axisAngle), dy = Math.sin(axisAngle);
+    const L = Math.max(gridCols, gridRows) * 0.75; // long enough
+    const x0 = -dx * L, y0 = -dy * L;
+    const x1 =  dx * L, y1 =  dy * L;
+    batch.axesPos = new Float32Array([x0,y0,x1,y1]);
+    batch.axesCol = new Float32Array([0.3,0.9,1.0,1.0, 0.3,0.9,1.0,1.0]); // cyan
+  }
+
+  function mapCellsToTris(cellsMap, alpha=1.0){
+    const entries = [...cellsMap.entries()];
+    const totalTris = entries.length * 2;
+    const pos = new Float32Array(totalTris * 3 * 2);
+    const col = new Float32Array(totalTris * 3 * 4);
+    let p=0, c=0;
+    for(const [key, idx] of entries){
+      const [is, js] = key.split(',');
+      const i = +is, j = +js;
+      const x0 = i - gridCols/2, y0 = j - gridRows/2;
+      const x1 = x0 + 1,        y1 = y0 + 1;
+      const rgba = [...paletteColors[idx]]; rgba[3] *= alpha;
+      const tri = [x0,y0, x1,y0, x1,y1,  x0,y0, x1,y1, x0,y1];
+      for(let t=0;t<tri.length;t++) pos[p++] = tri[t];
+      for(let v=0; v<6; v++){ col[c++]=rgba[0]; col[c++]=rgba[1]; col[c++]=rgba[2]; col[c++]=rgba[3]; }
+    }
+    return {pos,col,triCount: totalTris};
+  }
+
+  function rebuildPaintBatches(){
+    const servedData = mapCellsToTris(served, showServed? 0.35 : 0.0); // ghost hint
+    batch.servedPos = servedData.pos; batch.servedCol = servedData.col;
+    const ansData = mapCellsToTris(painted, 1.0);
+    batch.answerPos = ansData.pos; batch.answerCol = ansData.col;
+  }
+
+  function rebuildOriginLines(){
+    const vPerLine = 2;
+    const pos = new Float32Array(lines.length * vPerLine * 2);
+    const col = new Float32Array(lines.length * vPerLine * 4);
+    let p=0, c=0;
+    for(const L of lines){
+      const dx = Math.cos(L.angleRad), dy = Math.sin(L.angleRad);
+      const half = L.length / 2;
+      const x0 = -dx * half, y0 = -dy * half;
+      const x1 =  dx * half, y1 =  dy * half;
+      pos[p++]=x0; pos[p++]=y0; pos[p++]=x1; pos[p++]=y1;
+      for(let k=0;k<2;k++){ col[c++]=L.color[0]; col[c++]=L.color[1]; col[c++]=L.color[2]; col[c++]=L.color[3]; }
+    }
+    batch.lineCount = lines.length;
+    batch.linePos = pos; batch.lineCol = col;
+  }
+
+  // Cross markers for wrong/missing
+  function rebuildMarks(wrongCells, missingCells, attempt){
+    if((!wrongCells || wrongCells.length===0) && (!missingCells || missingCells.length===0)){
+      batch.marksPos=null; batch.marksCol=null; return;
+    }
+    const s = 0.48; // half-diagonal length inside cell
+    const pos = [];
+    const col = [];
+    const black = [0,0,0,1], white = [1,1,1,1];
+    function addBlackCross(i,j){
+      const cx = (i - gridCols/2) + 0.5;
+      const cy = (j - gridRows/2) + 0.5;
+      // Diagonal A (black)
+      pos.push(cx - s, cy - s, cx + s, cy + s);
+      col.push(...black, ...black);
+      // Diagonal B (white)
+      pos.push(cx - s, cy + s, cx + s, cy - s);
+      col.push(...black, ...black);
+    }
+    function addWhiteCross(i,j){
+      const cx = (i - gridCols/2) + 0.5;
+      const cy = (j - gridRows/2) + 0.5;
+      // Diagonal A (white)
+      pos.push(cx - s, cy - s, cx + s, cy + s);
+      col.push(...white, ...white);
+      // Diagonal B (white)
+      pos.push(cx - s, cy + s, cx + s, cy - s);
+      col.push(...white, ...white);
+    }
+    if(attempt===1){
+      (wrongCells||[]).forEach(([i,j])=> addBlackCross(i,j));
+    } else {
+      (wrongCells||[]).forEach(([i,j])=> addBlackCross(i,j));
+      (missingCells||[]).forEach(([i,j])=> addWhiteCross(i,j));
+    }
+    batch.marksPos = new Float32Array(pos);
+    batch.marksCol = new Float32Array(col);
+  }
+
+  /*** --- Draw helpers --- ***/
+  function bindAndDraw(mode, posData, colData){
+    if(!posData || posData.length===0) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+    gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(loc.a_pos);
+    gl.vertexAttribPointer(loc.a_pos, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufCol);
+    gl.bufferData(gl.ARRAY_BUFFER, colData, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(loc.a_col);
+    gl.vertexAttribPointer(loc.a_col, 4, gl.FLOAT, false, 0, 0);
+
+    gl.drawArrays(mode, 0, posData.length/2);
+  }
+
+  function draw(){
+    gl.clearColor(0.06,0.09,0.13,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(prog);
+    gl.uniform2f(loc.u_half, gridCols/2, gridRows/2);
+    gl.uniform1f(loc.u_aspect, state.aspect);
+
+    // Served (ghost), Answer (opaque)
+    bindAndDraw(gl.TRIANGLES, batch.servedPos, batch.servedCol);
+    bindAndDraw(gl.TRIANGLES, batch.answerPos, batch.answerCol);
+
+    // Axis of symmetry
+    gl.lineWidth(3);
+    bindAndDraw(gl.LINES, batch.axesPos, batch.axesCol);
+
+    // User drawn lines (optional)
+    gl.lineWidth(1);
+    bindAndDraw(gl.LINES, batch.linePos, batch.lineCol);
+
+    // Markers (crosses)
+    bindAndDraw(gl.LINES, batch.marksPos, batch.marksCol);
+
+    // Grid overlay last
+    gl.lineWidth(1);
+    bindAndDraw(gl.LINES, batch.gridPos, batch.gridCol);
+
+    updateHUD();
+  }
+
+  /*** --- Picking / Interaction --- ***/
+  function canvasToWorld(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1; // -1..1
+    const ny = 1 - ((clientY - rect.top) / rect.height) * 2; // -1..1 (flip Y)
+    const x = nx * (gridCols/2) * state.aspect; // inverse of vertex aspect correction
+    const y = ny * (gridRows/2);
+    return {x,y};
+  }
+  function worldToCellIndex(x, y){
+    const i = Math.floor(x + gridCols/2);
+    const j = Math.floor(y + gridRows/2);
+    if (i<0 || i>=gridCols || j<0 || j>=gridRows) return null;
+    return {i,j};
+  }
+
+  let isMouseDown = false; let shiftRowFill = false; let hoverState = {x:0,y:0, idx:null};
+  canvas.addEventListener('contextmenu', e=> e.preventDefault());
+  canvas.addEventListener('mousedown', (e)=>{
+    isMouseDown = true; shiftRowFill = e.shiftKey;
+    const {x,y} = canvasToWorld(e.clientX, e.clientY);
+    if(mode==='paint'){
+      const idx = worldToCellIndex(x,y); if(!idx) return;
+      if(e.button===2){ painted.delete(`${idx.i},${idx.j}`); }
+      else {
+        if(shiftRowFill){ for(let ii=0; ii<gridCols; ii++){ if(currentColorIndex>=0) painted.set(`${ii},${idx.j}`, currentColorIndex); else painted.delete(`${ii},${idx.j}`);} }
+        else { if(currentColorIndex>=0) painted.set(`${idx.i},${idx.j}`, currentColorIndex); else painted.delete(`${idx.i},${idx.j}`); }
+      }
+      rebuildPaintBatches(); draw();
+    } else if(mode==='line'){
+      // Update axis angle by click direction (optional)
+      const ang = Math.atan2(y, x) * 180/Math.PI;
+      axisAngle = Math.round(ang) * Math.PI/180;
+      axisInput.value = String(Math.round(ang)); axisVal.textContent = `${Math.round(ang)}°`;
+      rebuildAxisLine(); draw();
+    }
+  });
+  canvas.addEventListener('mousemove', (e)=>{
+    const {x,y} = canvasToWorld(e.clientX, e.clientY);
+    const idx = worldToCellIndex(x,y);
+    if(mode==='paint' && isMouseDown && idx){
+      if(shiftRowFill) return;
+      if(currentColorIndex>=0) painted.set(`${idx.i},${idx.j}`, currentColorIndex);
+      else painted.delete(`${idx.i},${idx.j}`);
+      rebuildPaintBatches(); draw();
+    }
+    hoverState = {x,y, idx}; updateHUD();
+  });
+  window.addEventListener('mouseup', ()=>{ isMouseDown=false; });
+
+  function updateHUD(){
+    const {x,y,idx} = hoverState;
+    const cellTxt = idx? `cell [${idx.i}, ${idx.j}]` : 'outside';
+    hud.textContent = `mode: ${mode} | world: (${x.toFixed(2)}, ${y.toFixed(2)}) | ${cellTxt}`;
+  }
+
+  /*** --- Symmetry Maths & Evaluation --- ***/
+  function cellCenter(i,j){ return { x: (i - gridCols/2) + 0.5, y: (j - gridRows/2) + 0.5 }; }
+  function centerToIndex(x,y){ return { i: Math.floor(x + gridCols/2), j: Math.floor(y + gridRows/2) }; }
+  function reflectPointAboutAxis(x,y, theta){
+    const ux = Math.cos(theta), uy = Math.sin(theta); // unit axis through origin
+    const dot = x*ux + y*uy; // v·u
+    const rx = 2*dot*ux - x; // 2(v·u)u - v
+    const ry = 2*dot*uy - y;
+    return {x:rx, y:ry};
+  }
+  function expectedReflection(servedMap){
+    const E = new Map();
+    for(const [key, cIdx] of servedMap){
+      const [is, js] = key.split(',');
+      const i = +is, j = +js;
+      const c = cellCenter(i,j);
+      const r = reflectPointAboutAxis(c.x, c.y, axisAngle);
+      const idx = centerToIndex(r.x, r.y);
+      if(idx.i>=0 && idx.i<gridCols && idx.j>=0 && idx.j<gridRows){
+        E.set(`${idx.i},${idx.j}`, cIdx);
+      }
+    }
+    return E;
+  }
+  function compareAnswer(){
+    const E = expectedReflection(served);
+    const wrongInputs = [];
+    const missingInputs = [];
+    let correct = 0, total = E.size;
+    for(const [k, expColor] of E){
+      const got = painted.get(k);
+      if(got === undefined){
+        missingInputs.push(k.split(',').map(Number));
+      } else if(got === expColor){
+        correct++;
+      } else {
+        wrongInputs.push(k.split(',').map(Number));
+      }
+    }
+    for(const k of painted.keys()){
+      if(!E.has(k)) wrongInputs.push(k.split(',').map(Number));
+    }
+    return {correct, total, wrongInputs, missingInputs};
+  }
+
+  /*** --- UI Wiring --- ***/
+  // Palette
+  const paletteRoot = document.getElementById('palette');
+  const paletteElems = [];
+  function addSwatch(color, isEraser){
+    const div = document.createElement('div');
+    div.className = 'swatch' + (paletteElems.length===0 && !isEraser ? ' active' : '');
+    div.style.background = isEraser ? 'repeating-conic-gradient(#0000 0 25%, #1b2736 0 50%) 50%/14px 14px' : `rgba(${Math.round(color[0]*255)}, ${Math.round(color[1]*255)}, ${Math.round(color[2]*255)}, ${color[3]})`;
+    div.title = isEraser? 'Eraser' : `Color ${paletteElems.length+1}`;
+    div.addEventListener('click', ()=>{
+      paletteElems.forEach(el=> el.classList.remove('active'));
+      div.classList.add('active');
+      currentColorIndex = isEraser? -1 : paletteElems.indexOf(div);
+    });
+    paletteElems.push(div);
+    paletteRoot.appendChild(div);
+  }
+  paletteColors.forEach(c=> addSwatch(c,false));
+  addSwatch(eraser,true);
+
+  // Mode pills
+  const modeRow = document.getElementById('modeRow');
+  modeRow.querySelectorAll('.pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      modeRow.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active'); mode = p.dataset.mode==='line' ? 'line' : 'paint'; updateHUD();
+    });
+  });
+
+  // Grid controls
+  const colsInput = document.getElementById('cols');
+  const rowsInput = document.getElementById('rows');
+  const colsVal = document.getElementById('colsVal');
+  const rowsVal = document.getElementById('rowsVal');
+  colsInput.addEventListener('input', ()=>{ gridCols = parseInt(colsInput.value,10); colsVal.textContent = gridCols; painted.clear(); served.clear(); resetStats(); rebuildAll(); });
+  rowsInput.addEventListener('input', ()=>{ gridRows = parseInt(rowsInput.value,10); rowsVal.textContent = gridRows; painted.clear(); served.clear(); resetStats(); rebuildAll(); });
+  document.getElementById('clearCells').addEventListener('click', ()=>{
+    painted.clear();
+    rebuildPaintBatches();
+    // rebuildMarks([],[],1);
+    // resetStats();
+    draw();
+  });
+
+  // Axis controls
+  const axisInput = document.getElementById('axisAngle');
+  const axisVal = document.getElementById('axisVal');
+  axisInput.addEventListener('input', ()=>{ axisVal.textContent = `${axisInput.value}°`; axisAngle = (+axisInput.value) * Math.PI/180; rebuildAxisLine(); draw(); });
+
+  // Challenge controls
+  const shapeCellsInput = document.getElementById('shapeCells');
+  const shapeCellsVal = document.getElementById('shapeCellsVal');
+  const shapeColorsInput = document.getElementById('shapeColors');
+  const shapeColorsVal = document.getElementById('shapeColorsVal');
+  shapeCellsInput.addEventListener('input', ()=> shapeCellsVal.textContent = shapeCellsInput.value);
+  shapeColorsInput.addEventListener('input', ()=> shapeColorsVal.textContent = shapeColorsInput.value);
+
+  // document.getElementById('toggleGhost').addEventListener('click', (e)=>{
+  //   showServed = !showServed; e.target.textContent = showServed ? 'Hide Served' : 'Show Served'; rebuildPaintBatches(); draw();
+  // });
+
+  document.getElementById('newChallenge').addEventListener('click', ()=>{
+    served.clear(); painted.clear(); rebuildMarks([],[],1);
+    axisAngle = (+axisInput.value) * Math.PI/180; rebuildAxisLine();
+    const n = parseInt(shapeCellsInput.value,10);
+    const maxC = parseInt(shapeColorsInput.value,10);
+    const startI = Math.floor(gridCols*0.25), startJ = Math.floor(gridRows*0.25);
+    const q = [[startI,startJ]]; const seen = new Set([`${startI},${startJ}`]);
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    while(q.length && served.size < n){
+      const [ci,cj] = q.shift();
+      const colorIdx = Math.floor(Math.random()*maxC);
+      if(ci>=0 && ci<gridCols && cj>=0 && cj<gridRows){ served.set(`${ci},${cj}`, colorIdx); }
+      for(const [dx,dy] of dirs){
+        const ni=ci+dx, nj=cj+dy, key=`${ni},${nj}`;
+        if(!seen.has(key) && Math.random()<0.6){ seen.add(key); q.push([ni,nj]); }
+      }
+    }
+    resetStats();
+    rebuildPaintBatches(); draw();
+  });
+
+  // Evaluation
+  const resultEl = document.getElementById('result');
+  const attemptsEl = document.getElementById('attempts');
+  const usedCheckEl = document.getElementById('usedCheck');
+
+  // helper to keep attempts & "Used Solution?" display in sync
+  function updateStatusUI(){
+    attemptsEl.textContent = attemptCount;
+    usedCheckEl.textContent = solutionRevealed ? 'Yes' : 'No';
+  }
+
+  // helper to reset attempts/flags between challenges or when clearing
+  function resetStats(){
+    attemptCount = 0;
+    solutionRevealed = false;
+    resultEl.textContent = '';
+    updateStatusUI();
+  }
+
+  document.getElementById('check').addEventListener('click', ()=>{
+    attemptCount++;
+    updateStatusUI();
+
+    const {correct, total, wrongInputs, missingInputs} = compareAnswer();
+    const markAttempt = attemptCount === 1 ? 1 : 2;
+    rebuildMarks(wrongInputs, missingInputs, markAttempt);
+    draw();
+    const wrongCount = wrongInputs.length + (attemptCount>=2 ? missingInputs.length : 0);
+    const ok = correct===total && wrongCount===0;
+    resultEl.innerHTML = ok ? `<span class="ok">Perfect! ${correct}/${total}</span>` : `<span class="bad">${correct}/${total} correct, ${wrongCount} issues${attemptCount>=2 ? ` (${wrongInputs.length} wrong, ${missingInputs.length} missing)` : ''}</span>`;
+  });
+
+  document.getElementById('showSolution').addEventListener('click', ()=>{
+    // Mark that the solution has been revealed, but keep attemptCount
+    solutionRevealed = true;
+    updateStatusUI();
+
+    painted.clear();
+    const E = expectedReflection(served);
+    for(const [k,v] of E) painted.set(k,v);
+    rebuildPaintBatches(); rebuildMarks([],[],1); draw();
+    resultEl.innerHTML = '<span class="small">Solution filled in.</span>';
+  });
+
+  // Shortcuts
+  window.addEventListener('keydown', (e)=>{
+    if(e.key==='p' || e.key==='P'){ mode = 'paint'; modeRow.querySelectorAll('.pill').forEach(x=>x.classList.toggle('active', x.dataset.mode!=='line')); updateHUD(); }
+    if(e.key==='l' || e.key==='L'){ mode = 'line';  modeRow.querySelectorAll('.pill').forEach(x=>x.classList.toggle('active', x.dataset.mode==='line')); updateHUD(); }
+  });
+
+  /*** --- Rebuild --- ***/
+  function rebuildAll(){
+    rebuildGridLines();
+    rebuildAxisLine();
+    rebuildPaintBatches();
+    rebuildOriginLines();
+    resizeCanvas();
+    draw();
+  }
+
+  // --- Self-tests (basic) --- //
+  function runSelfTests(){
+    // 1) Shader/program should be valid
+    console.assert(gl.getProgramParameter(prog, gl.LINK_STATUS) === true, 'Program should be linked');
+
+    // 2) Reflection about 0° (x-axis): (1,2) -> (1,-2)
+    let p1 = reflectPointAboutAxis(1,2, 0);
+    console.assert(Math.abs(p1.x-1) < 1e-6 && Math.abs(p1.y+2) < 1e-6, 'Reflect about x-axis');
+
+    // 3) Reflection about 90° (y-axis): (1,2) -> (-1,2)
+    let p2 = reflectPointAboutAxis(1,2, Math.PI/2);
+    console.assert(Math.abs(p2.x+1) < 1e-6 && Math.abs(p2.y-2) < 1e-6, 'Reflect about y-axis');
+
+    // 4) expectedReflection: single served at center, axis 0 should map symmetrically
+    axisAngle = 0;
+    const testServed = new Map([[`${Math.floor(gridCols/2)},${Math.floor(gridRows/2)+2}}`, 0]]);
+    const E = expectedReflection(testServed);
+    console.assert(E.size >= 1, 'expectedReflection should produce at least one cell');
+  }
+
+  // Initial build and status UI setup
+  rebuildAll();
+  updateStatusUI();
+  runSelfTests();
+})();
+</script>
+</body>
+</html>
